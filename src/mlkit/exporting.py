@@ -98,6 +98,126 @@ def export(project: Project | None, run: str | None = None, weights: str | None 
     return 0
 
 
+def check_export(project: Project, run: str | None = None,
+                 formats: list[str] | None = None, images: int = 8,
+                 iou: float = 0.6, conf: float = 0.25,
+                 strict_conf: float = 0.5) -> int:
+    """Сравнить боксы исходных весов и экспортированной модели.
+
+    Экспорт ломается тихо: другая нормализация входа, другой порядок выходов,
+    потерянный NMS — метрики при этом никто не пересчитывает, и мусор уезжает
+    в приложение. Здесь одни и те же кадры прогоняются через .pt и через
+    экспорт, а боксы сравниваются по IoU.
+
+    Важно, в каком окружении запускать: CoreML читается только тем
+    coremltools, что в обучающем .venv (в .venv-export версия старше и
+    падает по assert внутри MPSGraph), а TFLite — наоборот, только в
+    .venv-export. Поэтому `make export-check` запускает форматы порознь.
+    """
+    from ultralytics import YOLO
+
+    from .analysis import IMAGE_EXTENSIONS, _iou
+
+    source_weights = project.paths.weights(run)
+    if not source_weights.is_file():
+        raise SystemExit(f"Нет весов {source_weights}")
+
+    selected = formats or list(project.get("export.formats", ["coreml", "tflite"]))
+    model_name = str(project.get("export.model_name", project.name))
+    targets: list[Path] = []
+    for fmt in selected:
+        subdirectory, extension = FORMAT_LAYOUT[fmt]
+        candidate = project.paths.exports / subdirectory / f"{model_name}{extension}"
+        if candidate.exists():
+            targets.append(candidate)
+        else:
+            console.warn(f"{fmt}: нет {candidate} — сначала mlkit export {project.name}")
+    if not targets:
+        console.warn("Нечего проверять: нужных экспортов нет")
+        return 0
+
+    pool = project.paths.samples if project.paths.samples.is_dir() else None
+    if pool is None or not any(p.suffix.lower() in IMAGE_EXTENSIONS for p in pool.iterdir()):
+        pool = project.paths.dataset / "val" / "images"
+    picked = sorted(p for p in pool.iterdir()
+                    if p.suffix.lower() in IMAGE_EXTENSIONS)[:images]
+    if not picked:
+        raise SystemExit(f"Нет картинок для проверки в {pool}")
+
+    size = int(project.get("model.imgsz", 640))
+    console.step(f"Проверка экспорта на {len(picked)} кадрах")
+    console.kv("эталон", source_weights)
+    console.kv("порог conf / IoU", f"{conf} / {iou}")
+    console.kv("считаем ошибкой при conf ≥", strict_conf)
+
+    def boxes_of(model, image: Path) -> list[tuple]:
+        # По одному кадру: CoreML-бэкенд ultralytics не умеет батчи
+        result = model.predict(str(image), imgsz=size, conf=conf, verbose=False)[0]
+        return [(*box.xyxyn[0].tolist(), float(box.conf)) for box in result.boxes]
+
+    reference = YOLO(str(source_weights))
+    expected = [boxes_of(reference, image) for image in picked]
+
+    failed = False
+    for target in targets:
+        console.rule(target.name)
+        try:
+            exported = YOLO(str(target), task="detect")
+            produced = [boxes_of(exported, image) for image in picked]
+        except Exception as error:
+            console.err(f"модель не запустилась: {type(error).__name__}: {error}")
+            failed = True
+            continue
+
+        checked = 0
+        worst = 1.0
+        critical = 0
+        borderline = 0
+
+        def closest(box: tuple, pool: list[tuple]) -> float:
+            return max((_iou(box[:4], other[:4]) for other in pool), default=0.0)
+
+        for image, want, got in zip(picked, expected, produced):
+            for box in want:                       # что эталон нашёл, а экспорт — нет
+                best = closest(box, got)
+                checked += 1
+                if best >= iou:
+                    worst = min(worst, best)
+                    continue
+                if box[4] >= strict_conf:
+                    console.err(f"{image.name}: бокс conf={box[4]:.2f} потерян "
+                                f"(лучший IoU {best:.2f})")
+                    critical += 1
+                else:
+                    borderline += 1
+            for box in got:                        # что экспорт придумал сверх эталона
+                if closest(box, want) >= iou:
+                    continue
+                if box[4] >= strict_conf:
+                    console.err(f"{image.name}: лишний бокс conf={box[4]:.2f}")
+                    critical += 1
+                else:
+                    borderline += 1
+
+        if critical:
+            console.err(f"критичных расхождений: {critical} — в приложение не годится")
+            failed = True
+        else:
+            console.ok(f"совпадает с эталоном: сверено боксов {checked}, "
+                       f"худший IoU {worst:.3f}")
+        if borderline:
+            console.warn(
+                f"пограничных расхождений (conf < {strict_conf}): {borderline} — "
+                "разное подавление дубликатов в NMS, на качестве почти не сказывается"
+            )
+
+    if failed:
+        console.info("  частые причины: NMS (export.coreml_nms), int8-квантизация, "
+                     "другой imgsz на стороне приложения")
+        return 1
+    return 0
+
+
 def export_status(project: Project) -> list[str]:
     root = project.paths.exports
     if not root.is_dir():

@@ -105,7 +105,8 @@ def cmd_dataset(args: argparse.Namespace) -> int:
 
     project = load_project(args.project)
     return build_dataset(project, sources=args.source, verify=args.verify,
-                         val_ratio=args.val_ratio)
+                         val_ratio=args.val_ratio, test_ratio=args.test_ratio,
+                         group_by=args.group_by, max_negatives=args.max_negatives)
 
 
 def cmd_dataset_stats(args: argparse.Namespace) -> int:
@@ -114,19 +115,71 @@ def cmd_dataset_stats(args: argparse.Namespace) -> int:
     return dataset_stats(load_project(args.project))
 
 
+def _overrides(values: list[str] | None) -> dict:
+    """--set key=value -> словарь параметров обучения (значения читаются как YAML)."""
+    import yaml
+
+    result: dict = {}
+    for value in values or []:
+        if "=" not in value:
+            raise SystemExit(f"Ожидалось ключ=значение, получено «{value}»")
+        key, raw = value.split("=", 1)
+        result[key.strip()] = yaml.safe_load(raw)
+    return result
+
+
 def cmd_train(args: argparse.Namespace) -> int:
     from .training import train
 
     project = load_project(args.project)
     return train(project, epochs=args.epochs, device=args.device, batch=args.batch,
                  base_model=args.model, imgsz=args.imgsz, name=args.name,
-                 resume=args.resume)
+                 resume=args.resume, profile=args.profile,
+                 overrides=_overrides(args.set), dry_run=args.dry_run)
+
+
+def cmd_tune(args: argparse.Namespace) -> int:
+    from .training import tune
+
+    return tune(load_project(args.project), iterations=args.iterations,
+                epochs=args.epochs, profile=args.profile, device=args.device,
+                base_model=args.model)
+
+
+def cmd_runs(args: argparse.Namespace) -> int:
+    from .training import list_runs
+
+    return list_runs(load_project(args.project))
 
 
 def cmd_val(args: argparse.Namespace) -> int:
     from .training import validate
 
-    return validate(load_project(args.project), run=args.run, device=args.device)
+    return validate(load_project(args.project), run=args.run, device=args.device,
+                    split=getattr(args, "split", "val"))
+
+
+def cmd_errors(args: argparse.Namespace) -> int:
+    from .analysis import errors
+
+    return errors(load_project(args.project), run=args.run, split=args.split,
+                  conf=args.conf, iou=args.iou, limit=args.limit, device=args.device)
+
+
+def cmd_bench(args: argparse.Namespace) -> int:
+    from .analysis import benchmark
+
+    return benchmark(load_project(args.project), run=args.run, weights=args.weights,
+                     imgsz=args.imgsz, device=args.device, repeats=args.repeats,
+                     image=args.image, only=args.only)
+
+
+def cmd_export_check(args: argparse.Namespace) -> int:
+    from .exporting import check_export
+
+    return check_export(load_project(args.project), run=args.run, formats=args.format,
+                        images=args.images, iou=args.iou, conf=args.conf,
+                        strict_conf=args.strict_conf)
 
 
 def cmd_predict(args: argparse.Namespace) -> int:
@@ -161,11 +214,13 @@ def cmd_pipeline(args: argparse.Namespace) -> int:
         console.rule(f"стадия: {stage}")
         if stage == "dataset":
             code = cmd_dataset(argparse.Namespace(
-                project=args.project, source=None, verify=False, val_ratio=None))
+                project=args.project, source=None, verify=False, val_ratio=None,
+                test_ratio=None, group_by=None, max_negatives=None))
         elif stage == "train":
             code = cmd_train(argparse.Namespace(
                 project=args.project, epochs=args.epochs, device=args.device,
-                batch=None, model=None, imgsz=None, name=args.name, resume=False))
+                batch=None, model=None, imgsz=None, name=args.name, resume=False,
+                profile=args.profile, set=None, dry_run=False))
         else:
             code = _export_in_export_venv(args)
         if code != 0:
@@ -225,6 +280,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--source", action="append", help="источник (можно повторять)")
     p.add_argument("--verify", action="store_true", help="только проверить, не записывать")
     p.add_argument("--val-ratio", type=float, help="доля val")
+    p.add_argument("--test-ratio", type=float, help="доля отдельного test-сплита")
+    p.add_argument("--group-by", help="единица сплита: stem | roboflow | parent | regex:<шаблон>")
+    p.add_argument("--max-negatives", type=float, metavar="ДОЛЯ",
+                   help="доля кадров без объектов, например 0.1 (ориентир 1–10%%)")
     p.set_defaults(func=cmd_dataset)
 
     p = sub.add_parser("dataset-stats", help="1a) статистика собранного датасета")
@@ -239,16 +298,65 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--imgsz", type=int)
     p.add_argument("--model", help="базовые веса вместо model.base")
     p.add_argument("--name", help="имя прогона в runs/")
+    p.add_argument("--profile", help="профиль из секции profiles (fast, quality, finetune…)")
+    p.add_argument("--set", action="append", metavar="КЛЮЧ=ЗНАЧЕНИЕ",
+                   help="разово переопределить любой параметр ultralytics "
+                        "(можно повторять)")
+    p.add_argument("--dry-run", action="store_true",
+                   help="показать итоговые параметры и проверки, не обучая")
     p.add_argument("--resume", action="store_true", help="продолжить прерванное обучение")
     p.set_defaults(func=cmd_train)
+
+    p = sub.add_parser("tune", help="2f) подобрать гиперпараметры (генетический поиск)")
+    project_arg(p)
+    p.add_argument("--iterations", type=int, default=20, help="сколько наборов пробовать")
+    p.add_argument("--epochs", type=int, default=15, help="эпох в одной пробе")
+    p.add_argument("--profile", help="от какого профиля отталкиваться")
+    p.add_argument("--model", help="базовые веса")
+    p.add_argument("--device")
+    p.set_defaults(func=cmd_tune)
+
+    p = sub.add_parser("runs", help="2g) таблица прогонов с метриками")
+    project_arg(p)
+    p.set_defaults(func=cmd_runs)
 
     p = sub.add_parser("val", help="2a) метрики обученной модели на val")
     project_arg(p)
     p.add_argument("--run", help="какой прогон валидировать")
+    p.add_argument("--split", default="val", choices=("val", "test"))
     p.add_argument("--device")
     p.set_defaults(func=cmd_val)
 
-    p = sub.add_parser("predict", help="2b) прогнать модель по своим картинкам")
+    p = sub.add_parser("test-metrics",
+                       help="2b) честные метрики на отложенном test-сплите")
+    project_arg(p)
+    p.add_argument("--run")
+    p.add_argument("--device")
+    p.set_defaults(func=cmd_val, split="test")
+
+    p = sub.add_parser("errors", help="2c) найти кадры, где модель ошибается")
+    project_arg(p)
+    p.add_argument("--run")
+    p.add_argument("--split", default="val", choices=("train", "val", "test"))
+    p.add_argument("--conf", type=float)
+    p.add_argument("--iou", type=float, default=0.5, help="порог совпадения с разметкой")
+    p.add_argument("--limit", type=int, default=20, help="сколько худших кадров сохранить")
+    p.add_argument("--device")
+    p.set_defaults(func=cmd_errors)
+
+    p = sub.add_parser("bench", help="2d) замерить скорость весов и экспортов")
+    project_arg(p)
+    p.add_argument("--run")
+    p.add_argument("--weights", help="конкретный файл модели (.pt/.tflite/.mlpackage)")
+    p.add_argument("--image", help="на какой картинке замерять")
+    p.add_argument("--imgsz", type=int)
+    p.add_argument("--repeats", type=int, default=50)
+    p.add_argument("--only", action="append",
+                   help="ограничить формат: pt / tflite / mlpackage / onnx")
+    p.add_argument("--device")
+    p.set_defaults(func=cmd_bench)
+
+    p = sub.add_parser("predict", help="2e) прогнать модель по своим картинкам")
     project_arg(p)
     p.add_argument("--input", help="каталог с картинками (по умолчанию samples/)")
     p.add_argument("--output", help="куда класть аннотированные копии")
@@ -271,6 +379,19 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--pretrained", help="экспортировать готовую модель, например yolo11n.pt")
     p.set_defaults(func=cmd_export)
 
+    p = sub.add_parser("export-check",
+                       help="3a) сверить боксы экспорта с исходными весами")
+    project_arg(p)
+    p.add_argument("--run")
+    p.add_argument("--format", action="append",
+                   choices=("coreml", "tflite", "onnx", "torchscript"))
+    p.add_argument("--images", type=int, default=8, help="сколько кадров сверять")
+    p.add_argument("--iou", type=float, default=0.6, help="допустимое расхождение боксов")
+    p.add_argument("--conf", type=float, default=0.25)
+    p.add_argument("--strict-conf", type=float, default=0.5,
+                   help="расхождение считается ошибкой начиная с этой уверенности")
+    p.set_defaults(func=cmd_export_check)
+
     p = sub.add_parser("pipeline", help="прогнать несколько стадий подряд")
     project_arg(p)
     p.add_argument("--stages", default="dataset,train,export",
@@ -278,6 +399,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--epochs", type=int)
     p.add_argument("--device")
     p.add_argument("--name", help="имя прогона обучения")
+    p.add_argument("--profile", help="профиль обучения")
     p.set_defaults(func=cmd_pipeline)
 
     return parser

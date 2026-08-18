@@ -18,8 +18,14 @@ TASK ?=
 P    ?= $(TASK)
 
 # Часто используемые переопределения
-MODEL   ?=
-INPUT   ?=
+MODEL      ?=
+INPUT      ?=
+GROUP_BY   ?=
+TEST_RATIO ?=
+PROFILE    ?=
+ITERATIONS ?=
+LIMIT      ?=
+FORMAT     ?=
 EPOCHS  ?=
 DEVICE  ?=
 BATCH   ?=
@@ -28,11 +34,13 @@ RUN     ?=
 CONF    ?=
 SOURCE  ?=
 STAGES  ?=
-FORMAT  ?=
 SHOW    ?=
 ARGS    ?=
 
 opt = $(if $(2),$(1) $(2))
+# То же, но значение в кавычках: для путей с пробелами и шаблонов вроде
+# GROUP_BY='regex:([A-Z]{4}[0-9]{7})', которые иначе съест шелл
+optq = $(if $(2),$(1) '$(2)')
 
 .PHONY: check-project check-venv cli
 

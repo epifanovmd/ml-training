@@ -7,6 +7,13 @@
 На вход нужен готовый размеченный датасет — каталог в `datasets/<проект>/`.
 """
 
+import os
+
+# Ultralytics по умолчанию доустанавливает недостающие пакеты прямо в
+# работающее окружение (и однажды так ломает пару torch/torchvision).
+# Окружения здесь описаны в requirements/ — молчаливых изменений быть не должно.
+os.environ.setdefault("YOLO_AUTOINSTALL", "false")
+
 __version__ = "1.1.0"
 
 STAGES = ("dataset", "train", "eval", "export")
