@@ -15,8 +15,10 @@ import yaml
 from .. import __version__, console
 from ..config import Project, dataset_sources
 from ..paths import resolve
-from .discover import (Pair, assign_splits, find_pairs, looks_augmented, parse_label,
+from .discover import (Pair, find_pairs, looks_augmented, parse_label,
                         resolve_class_map, source_class_names)
+from .splits import (assign_splits, extend_assignment, load_state, save_state,
+                     signature)
 
 SPLITS = ("train", "val", "test")
 
@@ -41,7 +43,8 @@ def _sources(project: Project, override: list[str] | None) -> list[Path]:
 def build_dataset(project: Project, sources: list[str] | None = None,
                   verify: bool = False, val_ratio: float | None = None,
                   test_ratio: float | None = None, group_by: str | None = None,
-                  max_negatives: float | None = None) -> int:
+                  max_negatives: float | None = None,
+                  reset_splits: bool = False) -> int:
     """Собрать datasets -> workspace/<проект>/dataset. Каталог пересоздаётся."""
     source_dirs = _sources(project, sources)
     val_share = float(val_ratio if val_ratio is not None
@@ -121,7 +124,10 @@ def build_dataset(project: Project, sources: list[str] | None = None,
     hard_link = not bool(project.get("dataset.copy", True))
     counters = {split: 0 for split in SPLITS}
     counters.update({"empty": 0, "boxes": 0, "dropped": 0})
-    assignment = assign_splits(sorted(groups), val_share, test_share)
+    assignment, split_note = _resolve_assignment(project, sorted(groups), val_share,
+                                                 test_share, grouping, reset_splits)
+    if split_note:
+        console.info(f"  {split_note}")
 
     # Разметку читаем один раз: она же решает, кадр позитивный или фоновый
     parsed: dict[str, tuple[list[str], int]] = {}
@@ -163,9 +169,10 @@ def build_dataset(project: Project, sources: list[str] | None = None,
     with project.paths.data_yaml.open("w", encoding="utf-8") as fh:
         yaml.safe_dump(data_yaml, fh, allow_unicode=True, sort_keys=False)
 
+    _write_index(root, pairs, assignment, skipped_negatives)
     manifest = _write_manifest(project, root, per_source, counters, groups,
                                grouping, val_share, test_share, collapse, histogram,
-                               len(skipped_negatives))
+                               len(skipped_negatives), signature(assignment))
 
     for split in used_splits:
         console.kv(split, counters[split])
@@ -249,6 +256,60 @@ def _report_negatives(counters: dict, skipped: int) -> None:
                      "срабатывания на похожих текстурах; добавьте 1–10% фона")
 
 
+def _resolve_assignment(project: Project, groups: list[str], val_share: float,
+                        test_share: float, grouping: str,
+                        reset: bool) -> tuple[dict[str, str], str]:
+    """Раскладка групп по сплитам с учётом прошлых сборок.
+
+    «Липкие» сплиты (`dataset.stable_splits`) держат уже известные группы на
+    своих местах: без этого добор данных перетасовывает train и val, метрики
+    соседних прогонов становятся несравнимыми, а дообучение с прошлых весов
+    даёт утечку — модель уже видела то, что теперь в val.
+    """
+    state_path = project.paths.workspace / "splits.json"
+    if reset and state_path.exists():
+        state_path.unlink()
+        console.warn("--reset-splits: прежняя раскладка сплитов удалена")
+
+    stable = bool(project.get("dataset.stable_splits", True))
+    if not stable:
+        assignment = assign_splits(groups, val_share, test_share)
+        return assignment, "сплит пересчитан с нуля (stable_splits: false)"
+
+    state = load_state(state_path)
+    previous = state.get("assignment", {}) if state else {}
+    if previous and state.get("group_by") != grouping:
+        console.warn(f"group_by изменился ({state.get('group_by')} -> {grouping}) — "
+                     "прежняя раскладка не применима, считаю заново")
+        previous = {}
+    if previous and (state.get("val_ratio") != val_share
+                     or state.get("test_ratio") != test_share):
+        console.warn("доли val/test изменились: к известным группам они не "
+                     "применяются, новые доберут пропорции. Полный пересчёт — "
+                     "--reset-splits")
+
+    assignment, fresh = extend_assignment(previous, groups, val_share, test_share)
+    save_state(state_path, assignment, grouping, val_share, test_share)
+    if not previous:
+        return assignment, f"раскладка сплитов создана: {state_path.name}"
+    return assignment, (f"сплиты сохранены с прошлой сборки, новых групп: {fresh}")
+
+
+def _write_index(root: Path, pairs: list[Pair], assignment: dict[str, str],
+                 skipped: set[str]) -> None:
+    """CSV «кадр в датасете -> исходный файл»: чтобы править разметку в источнике."""
+    import csv
+
+    with (root / "index.csv").open("w", encoding="utf-8", newline="") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(["key", "split", "group", "source_image", "source_label"])
+        for pair in pairs:
+            if pair.key in skipped:
+                continue
+            writer.writerow([pair.key, assignment[pair.group], pair.group,
+                             str(pair.image), str(pair.label or "")])
+
+
 def _collapse_mode(project: Project, classes: list[str]) -> bool:
     """Сводить ли все классы источников в один.
 
@@ -321,7 +382,8 @@ def _warn_about_leakage(pairs: list[Pair], groups: set[str], grouping: str) -> N
 def _write_manifest(project: Project, root: Path, per_source: list[dict],
                     counters: dict, groups: set[str], grouping: str,
                     val_share: float, test_share: float, collapse: bool,
-                    histogram: Counter, dropped_negatives: int) -> Path:
+                    histogram: Counter, dropped_negatives: int,
+                    split_signature: str) -> Path:
     """Паспорт сборки: по нему видно, на каких данных обучен прогон."""
     config_text = project.paths.config_file.read_text(encoding="utf-8")
     document = {
@@ -331,6 +393,7 @@ def _write_manifest(project: Project, root: Path, per_source: list[dict],
         "classes": project.classes,
         "group_by": grouping,
         "collapse_classes": collapse,
+        "split_signature": split_signature,
         "val_ratio": val_share,
         "test_ratio": test_share,
         "sources": per_source,

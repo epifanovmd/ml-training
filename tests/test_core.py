@@ -14,9 +14,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from mlkit.config import deep_merge, dataset_sources, load_project  # noqa: E402
 from mlkit.dataset.build import _limit_negatives  # noqa: E402
-from mlkit.dataset.discover import (assign_splits, find_pairs, group_key,  # noqa: E402
-                                    label_for, parse_label, resolve_class_map,
+from mlkit.dataset.discover import (find_pairs, group_key, label_for,  # noqa: E402
+                                    parse_label, resolve_class_map,
                                     source_class_names, source_prefix)
+from mlkit.dataset.splits import (assign_splits, extend_assignment,  # noqa: E402
+                                  signature)
 
 
 class TestDataset(unittest.TestCase):
@@ -187,6 +189,47 @@ class TestClassMap(unittest.TestCase):
         with self.assertRaises(SystemExit):
             resolve_class_map({"code": "seal"}, self.source,
                               source_class_names(self.source), ["plate"])
+
+
+class TestStableSplits(unittest.TestCase):
+    """«Липкие» сплиты: известные группы не переезжают при пополнении данных."""
+
+    def test_known_groups_keep_their_split(self):
+        groups = [f"g{i}" for i in range(40)]
+        first = assign_splits(groups, 0.15, 0.15)
+        grown = groups + [f"new{i}" for i in range(40)]
+        second, fresh = extend_assignment(first, grown, 0.15, 0.15)
+        self.assertEqual(fresh, 40)
+        for key, split in first.items():
+            self.assertEqual(second[key], split, f"группа {key} переехала")
+
+    def test_new_groups_pull_ratios_to_target(self):
+        first = assign_splits([f"g{i}" for i in range(20)], 0.15, 0.15)
+        grown = list(first) + [f"new{i}" for i in range(180)]
+        second, _ = extend_assignment(first, grown, 0.15, 0.15)
+        share = lambda name: sum(1 for v in second.values() if v == name) / len(second)
+        self.assertAlmostEqual(share("val"), 0.15, delta=0.02)
+        self.assertAlmostEqual(share("test"), 0.15, delta=0.02)
+
+    def test_extension_is_deterministic(self):
+        first = assign_splits([f"g{i}" for i in range(10)], 0.2, 0.0)
+        grown = list(first) + [f"new{i}" for i in range(10)]
+        a, _ = extend_assignment(first, grown, 0.2, 0.0)
+        b, _ = extend_assignment(first, list(reversed(grown)), 0.2, 0.0)
+        self.assertEqual(a, b)
+
+    def test_empty_history_falls_back_to_plain_split(self):
+        groups = [f"g{i}" for i in range(30)]
+        assignment, fresh = extend_assignment({}, groups, 0.15, 0.15)
+        self.assertEqual(assignment, assign_splits(groups, 0.15, 0.15))
+        self.assertEqual(fresh, 30)
+
+    def test_signature_changes_with_assignment(self):
+        base = assign_splits([f"g{i}" for i in range(20)], 0.15, 0.0)
+        moved = dict(base)
+        moved["g0"] = "val" if base["g0"] != "val" else "train"
+        self.assertNotEqual(signature(base), signature(moved))
+        self.assertEqual(signature(base), signature(dict(base)))
 
 
 class TestNegatives(unittest.TestCase):

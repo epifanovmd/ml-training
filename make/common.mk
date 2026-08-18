@@ -24,6 +24,7 @@ GROUP_BY   ?=
 TEST_RATIO ?=
 PROFILE    ?=
 ITERATIONS ?=
+FROM       ?=
 LIMIT      ?=
 FORMAT     ?=
 EPOCHS  ?=

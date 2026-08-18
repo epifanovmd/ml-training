@@ -76,6 +76,7 @@ make train P=… EPOCHS=3 DEVICE=cpu    # разовые переопредел�
 make train P=… ARGS="--set freeze=10" # любой параметр ultralytics разово
 make resume P=…                       # продолжить прерванное обучение
 
+make finetune P=… FROM=v1 NAME=v2-ft  # дообучить поверх прошлого прогона
 make runs P=…                         # таблица прогонов, лучший сверху
 make val P=… ; make test-metrics P=…  # метрики на val / на отложенном сплите
 make errors P=… LIMIT=30              # кадры, где модель ошибается
@@ -101,5 +102,6 @@ $EDITOR projects/seal/project.yaml    # description, classes, export.model_name
 
 ## 6. Что читать дальше
 
+- `docs/cheatsheet.md` — все команды и типичные сценарии одной страницей
 - `README.md` — подробно по каждой стадии и все правила
 - `docs/architecture.md` — как устроено внутри и как расширять

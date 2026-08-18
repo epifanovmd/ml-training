@@ -74,11 +74,45 @@ def run_name_for(project: Project, name: str | None, base_model: str | None,
     if name:
         return name
     parts = [project.name]
-    if base_model:
+    previous = _run_of_weights(project, Path(base_model)) if base_model else None
+    if previous:
+        # Дообучение поверх своего прогона: в имени полезен исходный прогон,
+        # а не бесполезное «best». Профиль finetune в имени не дублируем.
+        short = previous[len(project.name) + 1:] if previous.startswith(f"{project.name}-") \
+            else (previous if previous != project.name else "")
+        parts.append(f"ft-{short}" if short else "ft")
+        if profile and profile != "finetune":
+            parts.append(profile)
+    elif base_model:
         parts.append(Path(base_model).stem)
-    if profile:
+        if profile:
+            parts.append(profile)
+    elif profile:
         parts.append(profile)
     return "-".join(parts)
+
+
+def _run_of_weights(project: Project, weights: Path) -> str | None:
+    """Имя прогона, если веса лежат внутри runs/ этого проекта."""
+    try:
+        relative = weights.resolve().relative_to(project.paths.runs.resolve())
+    except (ValueError, OSError):
+        return None
+    return relative.parts[0] if relative.parts else None
+
+
+def weights_of_run(project: Project, run: str) -> str:
+    """Путь к best.pt конкретного прогона — для дообучения поверх него."""
+    weights = project.paths.weights(run)
+    if not weights.is_file():
+        available = sorted(path.name for path in project.paths.runs.glob("*")
+                           if (path / "weights" / "best.pt").is_file()) \
+            if project.paths.runs.is_dir() else []
+        raise SystemExit(
+            f"Нет весов прогона «{run}» ({weights}). "
+            f"Доступные: {', '.join(available) or 'нет ни одного'}"
+        )
+    return str(weights)
 
 
 def apply_profile(project: Project, profile: str | None) -> dict:
@@ -241,7 +275,8 @@ def train(project: Project, epochs: int | None = None, device: str | None = None
           batch: int | None = None, base_model: str | None = None,
           imgsz: int | None = None, name: str | None = None,
           resume: bool = False, profile: str | None = None,
-          overrides: dict | None = None, dry_run: bool = False) -> int:
+          overrides: dict | None = None, dry_run: bool = False,
+          from_run: str | None = None) -> int:
     from ultralytics import YOLO
 
     data_yaml = project.paths.data_yaml
@@ -268,6 +303,8 @@ def train(project: Project, epochs: int | None = None, device: str | None = None
     validate_keys("augment", augment)
     settings = resolve_auto(settings)
 
+    if from_run:
+        base_model = weights_of_run(project, from_run)
     weights = resolve_base_weights(
         base_model or data.get("model", {}).get("base", "yolo11n.pt")
     )
@@ -279,6 +316,9 @@ def train(project: Project, epochs: int | None = None, device: str | None = None
         weights = str(last)
 
     console.kv("прогон", f"runs/{run}")
+    if not resume and (project.paths.run_dir(run) / "weights" / "best.pt").is_file():
+        console.warn(f"прогон «{run}» уже существует и будет перезаписан — "
+                     "задайте NAME=<имя>, если он ещё нужен")
     console.kv("датасет", data_yaml)
     console.kv("базовые веса", weights)
     console.kv("imgsz", size)
@@ -288,6 +328,7 @@ def train(project: Project, epochs: int | None = None, device: str | None = None
     console.kv("оптимизатор", f"{settings.get('optimizer')} lr0={settings.get('lr0')}")
 
     preflight(project, settings, size)
+    _warn_if_split_changed(project, weights)
     if dry_run:
         console.warn("--dry-run: параметры проверены, обучение не запускалось")
         console.info(json.dumps({"train": settings, "augment": augment},
@@ -328,6 +369,33 @@ def train(project: Project, epochs: int | None = None, device: str | None = None
         hint += f" --run {run}"
     console.info(f"  затем: {hint}")
     return 0
+
+
+def _warn_if_split_changed(project: Project, weights: str) -> None:
+    """Сравнить сплит текущего датасета со сплитом прогона, с которого стартуем.
+
+    Если раскладка изменилась, прошлая модель могла обучаться на кадрах,
+    которые теперь в val: метрики окажутся завышенными, а сравнение с тем
+    прогоном — некорректным.
+    """
+    previous_run = _run_of_weights(project, Path(weights))
+    if not previous_run:
+        return
+    old = project.paths.run_dir(previous_run) / "dataset_manifest.json"
+    new = project.paths.dataset / "manifest.json"
+    if not (old.is_file() and new.is_file()):
+        return
+    try:
+        old_signature = json.loads(old.read_text(encoding="utf-8")).get("split_signature")
+        new_signature = json.loads(new.read_text(encoding="utf-8")).get("split_signature")
+    except json.JSONDecodeError:
+        return
+    if old_signature and new_signature and old_signature != new_signature:
+        console.warn(
+            f"сплит изменился с прогона «{previous_run}» ({old_signature} -> "
+            f"{new_signature}): часть кадров могла переехать из train в val, "
+            "метрики будут завышены. Помогает dataset.stable_splits: true"
+        )
 
 
 def _record_run(project: Project, run: str, weights: str, imgsz: int,

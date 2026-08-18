@@ -1,6 +1,6 @@
 # Стадия 4 — обучение и проверка модели.
 
-.PHONY: train resume val test-metrics errors bench predict tune runs
+.PHONY: train train-dry finetune resume val test-metrics errors bench predict tune runs
 
 train: check-project ## 2) обучить: make train P=… [PROFILE= EPOCHS= DEVICE= MODEL= NAME=]
 	$(MLKIT) train $(P) $(call opt,--profile,$(PROFILE)) $(call opt,--epochs,$(EPOCHS)) \
@@ -11,29 +11,35 @@ train-dry: check-project ## 2a) показать итоговые парамет
 	$(MLKIT) train $(P) $(call opt,--profile,$(PROFILE)) $(call opt,--epochs,$(EPOCHS)) \
 		$(call opt,--device,$(DEVICE)) --dry-run $(ARGS)
 
-resume: check-project ## 2b) продолжить прерванное обучение
+finetune: check-project ## 2b) дообучить поверх прогона: make finetune P=… FROM=<прогон>
+	@test -n "$(FROM)" || { echo "Нужен FROM=<прогон>: make finetune P=$(P) FROM=container-code"; exit 1; }
+	$(MLKIT) train $(P) --from-run $(FROM) --profile $(if $(PROFILE),$(PROFILE),finetune) \
+		$(call opt,--epochs,$(EPOCHS)) $(call opt,--device,$(DEVICE)) \
+		$(call opt,--name,$(NAME)) $(ARGS)
+
+resume: check-project ## 2c) продолжить прерванное обучение
 	$(MLKIT) train $(P) --resume $(call opt,--name,$(NAME)) $(ARGS)
 
-val: check-project ## 2c) метрики обученной модели на val
+val: check-project ## 2d) метрики обученной модели на val
 	$(MLKIT) val $(P) $(call opt,--run,$(RUN)) $(call opt,--device,$(DEVICE)) $(ARGS)
 
-test-metrics: check-project ## 2d) честные метрики на отложенном test-сплите
+test-metrics: check-project ## 2e) честные метрики на отложенном test-сплите
 	$(MLKIT) test-metrics $(P) $(call opt,--run,$(RUN)) $(call opt,--device,$(DEVICE)) $(ARGS)
 
-errors: check-project ## 2e) кадры, где модель ошибается: make errors P=… [LIMIT= CONF=]
+errors: check-project ## 2f) кадры, где модель ошибается: make errors P=… [LIMIT= CONF=]
 	$(MLKIT) errors $(P) $(call opt,--run,$(RUN)) $(call opt,--conf,$(CONF)) \
-		$(call opt,--limit,$(LIMIT)) $(call opt,--device,$(DEVICE)) $(ARGS)
+		$(call opt,--limit,$(LIMIT)) $(call opt,--device,$(DEVICE)) --export-list $(ARGS)
 
-bench: check-project ## 2f) скорость весов и экспортов (мс/кадр, FPS, размер)
+bench: check-project ## 2g) скорость весов и экспортов (мс/кадр, FPS, размер)
 	$(MLKIT) bench $(P) $(call opt,--run,$(RUN)) $(call opt,--device,$(DEVICE)) $(ARGS)
 
-predict: check-project ## 2g) прогнать модель по картинкам: make predict P=… [INPUT= CONF=]
+predict: check-project ## 2h) прогнать модель по картинкам: make predict P=… [INPUT= CONF=]
 	$(MLKIT) predict $(P) $(call optq,--input,$(INPUT)) $(call opt,--conf,$(CONF)) \
 		$(call opt,--run,$(RUN)) $(call opt,--device,$(DEVICE)) $(if $(SHOW),--show) $(ARGS)
 
-tune: check-project ## 2h) подобрать гиперпараметры: make tune P=… [ITERATIONS= EPOCHS=]
+tune: check-project ## 2i) подобрать гиперпараметры: make tune P=… [ITERATIONS= EPOCHS=]
 	$(MLKIT) tune $(P) $(call opt,--iterations,$(ITERATIONS)) $(call opt,--epochs,$(EPOCHS)) \
 		$(call opt,--profile,$(PROFILE)) $(call opt,--device,$(DEVICE)) $(ARGS)
 
-runs: check-project ## 2i) таблица прогонов с метриками
+runs: check-project ## 2j) таблица прогонов с метриками
 	$(MLKIT) runs $(P)

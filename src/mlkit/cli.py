@@ -106,7 +106,8 @@ def cmd_dataset(args: argparse.Namespace) -> int:
     project = load_project(args.project)
     return build_dataset(project, sources=args.source, verify=args.verify,
                          val_ratio=args.val_ratio, test_ratio=args.test_ratio,
-                         group_by=args.group_by, max_negatives=args.max_negatives)
+                         group_by=args.group_by, max_negatives=args.max_negatives,
+                         reset_splits=args.reset_splits)
 
 
 def cmd_dataset_stats(args: argparse.Namespace) -> int:
@@ -135,7 +136,8 @@ def cmd_train(args: argparse.Namespace) -> int:
     return train(project, epochs=args.epochs, device=args.device, batch=args.batch,
                  base_model=args.model, imgsz=args.imgsz, name=args.name,
                  resume=args.resume, profile=args.profile,
-                 overrides=_overrides(args.set), dry_run=args.dry_run)
+                 overrides=_overrides(args.set), dry_run=args.dry_run,
+                 from_run=args.from_run)
 
 
 def cmd_tune(args: argparse.Namespace) -> int:
@@ -163,7 +165,8 @@ def cmd_errors(args: argparse.Namespace) -> int:
     from .analysis import errors
 
     return errors(load_project(args.project), run=args.run, split=args.split,
-                  conf=args.conf, iou=args.iou, limit=args.limit, device=args.device)
+                  conf=args.conf, iou=args.iou, limit=args.limit, device=args.device,
+                  export_list=args.export_list)
 
 
 def cmd_bench(args: argparse.Namespace) -> int:
@@ -215,12 +218,13 @@ def cmd_pipeline(args: argparse.Namespace) -> int:
         if stage == "dataset":
             code = cmd_dataset(argparse.Namespace(
                 project=args.project, source=None, verify=False, val_ratio=None,
-                test_ratio=None, group_by=None, max_negatives=None))
+                test_ratio=None, group_by=None, max_negatives=None,
+                reset_splits=False))
         elif stage == "train":
             code = cmd_train(argparse.Namespace(
                 project=args.project, epochs=args.epochs, device=args.device,
                 batch=None, model=None, imgsz=None, name=args.name, resume=False,
-                profile=args.profile, set=None, dry_run=False))
+                profile=args.profile, set=None, dry_run=False, from_run=None))
         else:
             code = _export_in_export_venv(args)
         if code != 0:
@@ -282,6 +286,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--val-ratio", type=float, help="доля val")
     p.add_argument("--test-ratio", type=float, help="доля отдельного test-сплита")
     p.add_argument("--group-by", help="единица сплита: stem | roboflow | parent | regex:<шаблон>")
+    p.add_argument("--reset-splits", action="store_true",
+                   help="пересчитать train/val/test с нуля, забыв прошлую раскладку")
     p.add_argument("--max-negatives", type=float, metavar="ДОЛЯ",
                    help="доля кадров без объектов, например 0.1 (ориентир 1–10%%)")
     p.set_defaults(func=cmd_dataset)
@@ -297,6 +303,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--batch", type=int)
     p.add_argument("--imgsz", type=int)
     p.add_argument("--model", help="базовые веса вместо model.base")
+    p.add_argument("--from-run", metavar="ПРОГОН",
+                   help="дообучить поверх весов своего прогона (его best.pt)")
     p.add_argument("--name", help="имя прогона в runs/")
     p.add_argument("--profile", help="профиль из секции profiles (fast, quality, finetune…)")
     p.add_argument("--set", action="append", metavar="КЛЮЧ=ЗНАЧЕНИЕ",
@@ -341,6 +349,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--conf", type=float)
     p.add_argument("--iou", type=float, default=0.5, help="порог совпадения с разметкой")
     p.add_argument("--limit", type=int, default=20, help="сколько худших кадров сохранить")
+    p.add_argument("--export-list", action="store_true",
+                   help="выгрузить CSV со всеми проблемными кадрами и путями в источниках")
     p.add_argument("--device")
     p.set_defaults(func=cmd_errors)
 

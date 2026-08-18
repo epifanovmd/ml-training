@@ -122,9 +122,21 @@ def _draw(frame: Frame, target: Path, classes: list[str] | None = None) -> None:
     image.save(target, quality=90)
 
 
+def _source_index(project: Project) -> dict[str, tuple[str, str]]:
+    """Кадр в датасете -> исходные файлы (из index.csv, пишется при сборке)."""
+    import csv
+
+    path = project.paths.dataset / "index.csv"
+    if not path.is_file():
+        return {}
+    with path.open(encoding="utf-8") as fh:
+        return {row["key"]: (row["source_image"], row["source_label"])
+                for row in csv.DictReader(fh)}
+
+
 def errors(project: Project, run: str | None = None, split: str = "val",
            conf: float | None = None, iou: float = 0.5, limit: int = 20,
-           device: str | None = None) -> int:
+           device: str | None = None, export_list: bool = False) -> int:
     """Найти кадры, где модель ошибается, и сохранить их с боксами."""
     from ultralytics import YOLO
 
@@ -193,8 +205,35 @@ def errors(project: Project, run: str | None = None, split: str = "val",
                 + f"_{frame.image.name}")
         _draw(frame, target / name, project.classes)
     console.ok(f"Худшие {min(limit, len(frames))} кадров: {target}")
-    console.info(f"  зелёный — пропущенная разметка, розовый — лишнее срабатывание")
+    console.info("  зелёный — пропущенная разметка, розовый — лишнее срабатывание")
+
+    if export_list:
+        _export_problem_list(project, frames, target / "problems.csv")
     return 0
+
+
+def _export_problem_list(project: Project, frames: list[Frame], path: Path) -> None:
+    """Список проблемных кадров с путями в источниках — чтобы править разметку.
+
+    Правки вносятся в `datasets/`, а не в собранный датасет: он
+    пересоздаётся при каждой сборке.
+    """
+    import csv
+
+    index = _source_index(project)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(["key", "пропущено", "лишних", "перепутан_класс",
+                         "исходное_изображение", "исходная_разметка"])
+        for frame in frames:
+            source_image, source_label = index.get(frame.image.stem, ("", ""))
+            writer.writerow([frame.image.stem, len(frame.missed), len(frame.spurious),
+                             frame.confused, source_image, source_label])
+    console.ok(f"Список для правки разметки: {path} ({len(frames)} кадров)")
+    if not index:
+        console.warn("index.csv не найден — пересоберите датасет, чтобы в списке "
+                     "появились пути к исходным файлам")
 
 
 def benchmark(project: Project, run: str | None = None, weights: str | None = None,
