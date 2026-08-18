@@ -1,0 +1,62 @@
+# Детектор региона с кодом морского контейнера (ISO 6346).
+# Потребитель модели — мобильное приложение (features/container-scan):
+# детектор находит регион, текст читают Apple Vision / ML Kit.
+#
+# Размеченные данные берутся из datasets/container-code/ (любое число
+# подкаталогов в YOLO-формате).
+#
+# Всё, чего нет в этом файле, берётся из значений по умолчанию ядра
+# (src/mlkit/defaults.yaml).
+
+description: Код морского контейнера ISO 6346 на бортах и дверях
+
+classes:
+  - container_code
+
+# --- 1. датасет ------------------------------------------------------------
+dataset:
+  # Пусто = все подкаталоги datasets/container-code/
+  sources: []
+  val_ratio: 0.15
+
+# --- 2. обучение -----------------------------------------------------------
+model:
+  base: yolo11n.pt             # n — скорость на телефоне, s — точнее
+  imgsz: 640                   # мелкий текст на борту: меньше 640 не берём
+
+train:
+  epochs: 150
+  batch: 16
+  patience: 30
+  optimizer: auto
+  lr0: 0.01
+  cos_lr: true
+  device: mps
+  workers: 8
+  seed: 42
+
+# Ржавчина и грязь имитируются цветовыми сдвигами и стиранием, съёмка
+# с рук — перспективой и сдвигами. Горизонтальный флип допустим:
+# детектор ищет регион, читает текст OCR.
+augment:
+  hsv_h: 0.02
+  hsv_s: 0.6
+  hsv_v: 0.5
+  degrees: 8.0
+  translate: 0.15
+  scale: 0.6
+  shear: 4.0
+  perspective: 0.0006
+  flipud: 0.0
+  fliplr: 0.3
+  mosaic: 0.7
+  close_mosaic: 15
+  mixup: 0.05
+  erasing: 0.3
+
+# --- 3. экспорт ------------------------------------------------------------
+export:
+  model_name: container_code_detector    # iOS: <имя>.mlpackage, Android: <имя>.tflite
+  formats: [coreml, tflite]
+  coreml_nms: false            # постобработку делает приложение
+  tflite_int8: false

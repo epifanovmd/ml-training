@@ -1,0 +1,19 @@
+# окружения
+.venv/
+.venv-export/
+__pycache__/
+*.pyc
+
+# сырьё и генерируемое
+datasets/
+workspace/
+weights/
+*.pt
+*.onnx
+
+# артефакты экспорта, которые onnx2tf кладёт в корень
+calibration_image_sample_data*.npy
+
+# служебное
+.DS_Store
+.idea/

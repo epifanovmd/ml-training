@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Обёртка над CLI: bin/mlkit status container-code
+# Экспорт (стадия 5) сам уходит в .venv-export, остальное — в .venv.
+set -euo pipefail
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+venv="$root/.venv"
+if [ "${1:-}" = "export" ] && [ -x "$root/.venv-export/bin/python" ]; then
+  venv="$root/.venv-export"
+fi
+if [ ! -x "$venv/bin/python" ]; then
+  echo "Нет $venv — выполните make install (или make install-export)" >&2
+  exit 1
+fi
+PYTHONPATH="$root/src${PYTHONPATH:+:$PYTHONPATH}" exec "$venv/bin/python" -m mlkit "$@"

@@ -1,0 +1,45 @@
+# Детектор региона автомобильного номера (РФ, ГОСТ Р 50577).
+# Размеченные данные — в datasets/plate/ (YOLO-формат).
+
+description: Регион автомобильного номера
+
+classes:
+  - plate
+
+dataset:
+  val_ratio: 0.15
+
+model:
+  base: yolo11n.pt
+  imgsz: 640
+
+train:
+  epochs: 120
+  batch: 16
+  patience: 30
+  device: mps
+  workers: 8
+  seed: 42
+
+# Номер — жёсткая пластина: меньше перспективы, больше вариаций освещения
+# (ночь, фары, блики).
+augment:
+  hsv_h: 0.02
+  hsv_s: 0.5
+  hsv_v: 0.6
+  degrees: 6.0
+  translate: 0.15
+  scale: 0.7
+  shear: 3.0
+  perspective: 0.0004
+  fliplr: 0.5
+  mosaic: 0.7
+  close_mosaic: 10
+  mixup: 0.05
+  erasing: 0.2
+
+export:
+  model_name: plate_detector
+  formats: [coreml, tflite]
+  coreml_nms: false
+  tflite_int8: false

@@ -1,0 +1,24 @@
+# Окружение экспорта (.venv-export, ставится `make install-export`).
+# Обучающий .venv для экспорта непригоден: ultralytics 8.4 конвертирует
+# TFLite через litert-torch, который даунгрейдит torch и ломает пару
+# torch/torchvision; coremltools 9 несовместим с numpy 2.5.
+# Здесь — проверенная связка ultralytics 8.3 + coremltools 8 + onnx2tf.
+ultralytics==8.3.203
+torch==2.6.0
+torchvision==0.21.0
+numpy==2.3.5
+
+# CoreML (iOS)
+coremltools==8.3.0
+
+# TFLite (Android): onnx -> tensorflow saved_model -> tflite
+onnx==1.22.0
+onnx2tf==1.28.8
+onnxslim==0.1.95
+onnxruntime==1.28.0
+onnx_graphsurgeon==0.6.1
+sng4onnx==2.0.1
+tensorflow==2.21.0
+tf_keras==2.21.0
+ai-edge-litert==2.1.6
+psutil==7.2.2
