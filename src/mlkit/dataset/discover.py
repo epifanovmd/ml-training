@@ -104,12 +104,14 @@ def looks_augmented(pairs: list[Pair]) -> int:
 
 
 def source_class_names(source: Path) -> dict[int, str]:
-    """Имена классов источника из его data.yaml, если он есть.
+    """Имена классов источника: `data.yaml` (Roboflow) либо `classes.txt`.
 
-    Roboflow и подобные экспорты кладут рядом data.yaml с `names`. По именам
-    сопоставлять классы надёжнее, чем по номерам: у разных источников
-    нумерация своя, и молчаливая путаница классов — самая дорогая ошибка
-    при слиянии датасетов.
+    По именам сопоставлять классы надёжнее, чем по номерам: у разных
+    источников нумерация своя, и молчаливая путаница классов — самая дорогая
+    ошибка при слиянии датасетов. Поэтому имён ищем два формата: `names` в
+    data.yaml кладут Roboflow и подобные экспорты, а `classes.txt` (имя
+    класса в строке, номер строки = индекс) — labelImg, CVAT и datakit из
+    соседнего ml-datasets.
     """
     candidates = [source / "data.yaml", source / "data.yml"]
     candidates += sorted(source.glob("*/data.y*ml"))[:3]
@@ -125,6 +127,15 @@ def source_class_names(source: Path) -> dict[int, str]:
             return {int(key): str(value) for key, value in names.items()}
         if isinstance(names, list):
             return {index: str(value) for index, value in enumerate(names)}
+
+    for candidate in [source / "classes.txt", *sorted(source.glob("*/classes.txt"))[:3]]:
+        if not candidate.is_file():
+            continue
+        names = [line.strip() for line
+                 in candidate.read_text(encoding="utf-8", errors="replace").splitlines()
+                 if line.strip()]
+        if names:
+            return dict(enumerate(names))
     return {}
 
 
@@ -172,17 +183,19 @@ def resolve_class_map(raw: dict | None, source: Path, source_names: dict[int, st
 
 
 def parse_label(path: Path, keep_classes: set[int] | None = None,
-                mapping: dict[int, int] | None = None, collapse: bool = True,
-                num_classes: int = 1) -> tuple[list[str], int, Counter, set[int]]:
+                mapping: dict[int, int] | None = None, collapse: bool = False,
+                num_classes: int = 1) -> tuple[list[str], int, Counter, Counter]:
     """Строки разметки, приведённые к классам проекта.
 
-    Возвращает (строки, отброшено, счётчик классов, классы вне диапазона).
-    `collapse` — свалить все классы источника в 0 (одноклассовая задача).
+    Возвращает (строки, отброшено, счётчик классов, боксы классов вне
+    диапазона). `collapse` — свалить все классы источника в 0 (одноклассовая
+    задача); включается только явным `dataset.collapse_classes: true`, потому
+    что схлопывание принимает любой класс источника за целевой.
     """
     lines: list[str] = []
     dropped = 0
     counts: Counter = Counter()
-    out_of_range: set[int] = set()
+    out_of_range: Counter = Counter()
     for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
         parts = raw.split()
         if len(parts) < 5:
@@ -203,16 +216,20 @@ def parse_label(path: Path, keep_classes: set[int] | None = None,
             dropped += 1
             continue
 
-        if collapse:
-            target = 0
-        elif mapping is not None:
+        if mapping is not None:
             if source_class not in mapping:
                 continue            # класса нет в карте — считаем его лишним
             target = mapping[source_class]
         else:
             target = source_class
-        if not 0 <= target < num_classes:
-            out_of_range.add(source_class)
+        # Схлопывание идёт последним шагом, а не первым: иначе класс, которого
+        # нет в `classes` проекта, молча становится нулевым, и посторонний
+        # объект уезжает в датасет под именем целевого — детектор учится
+        # срабатывать на нём, а OCR приложения читает оттуда мусор.
+        if collapse:
+            target = 0
+        elif not 0 <= target < num_classes:
+            out_of_range[source_class] += 1
             continue
 
         counts[target] += 1

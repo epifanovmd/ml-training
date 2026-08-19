@@ -36,18 +36,38 @@ class TestDataset(unittest.TestCase):
         return self.path
 
     def test_classes_collapsed_to_zero(self):
-        lines, dropped, counts, _ = parse_label(self.write("3 0.5 0.5 0.2 0.2\n"))
+        lines, dropped, counts, _ = parse_label(self.write("3 0.5 0.5 0.2 0.2\n"),
+                                                collapse=True)
         self.assertEqual(lines, ["0 0.500000 0.500000 0.200000 0.200000"])
         self.assertEqual((dropped, counts[0]), (0, 1))
 
-    def test_keep_classes_filters(self):
-        lines, *_ = parse_label(self.write("0 0.5 0.5 0.2 0.2\n2 0.1 0.1 0.1 0.1\n"), {2})
+    def test_foreign_class_is_not_collapsed_silently(self):
+        """Без явного collapse чужой класс не становится целевым.
+
+        Это и был баг: разметка «типоразмер» уезжала в датасет под именем
+        «код контейнера», и детектор учился звать кодом что попало.
+        """
+        lines, _, _, out_of_range = parse_label(
+            self.write("0 0.5 0.5 0.2 0.2\n1 0.3 0.3 0.1 0.1\n"), num_classes=1)
         self.assertEqual(len(lines), 1)
-        self.assertTrue(lines[0].startswith("0 0.100000"))
+        self.assertEqual(dict(out_of_range), {1: 1})
+
+    def test_keep_classes_filters(self):
+        """keep_classes — фильтр, а не переномерация: номера остаются как были."""
+        lines, *_ = parse_label(self.write("0 0.5 0.5 0.2 0.2\n2 0.1 0.1 0.1 0.1\n"),
+                                {2}, num_classes=3)
+        self.assertEqual(len(lines), 1)
+        self.assertTrue(lines[0].startswith("2 0.100000"))
+
+    def test_kept_class_outside_project_is_reported(self):
+        """Отфильтровали — не значит переименовали: номер вне classes = ошибка."""
+        lines, _, _, out_of_range = parse_label(
+            self.write("2 0.1 0.1 0.1 0.1\n"), {2}, num_classes=1)
+        self.assertEqual((lines, dict(out_of_range)), ([], {2: 1}))
 
     def test_broken_coordinates_dropped(self):
         lines, dropped, *_ = parse_label(
-            self.write("0 1.5 0.5 0.2 0.2\n0 0.5 0.5 0 0.2\n"))
+            self.write("0 1.5 0.5 0.2 0.2\n0 0.5 0.5 0 0.2\n"), collapse=True)
         self.assertEqual(lines, [])
         self.assertEqual(dropped, 2)
 
@@ -74,7 +94,7 @@ class TestDataset(unittest.TestCase):
         lines, _, _, out_of_range = parse_label(
             self.write("7 0.5 0.5 0.2 0.2\n"), collapse=False, num_classes=2)
         self.assertEqual(lines, [])
-        self.assertEqual(out_of_range, {7})
+        self.assertEqual(dict(out_of_range), {7: 1})
 
     def test_split_is_deterministic(self):
         groups = [f"group-{index}" for index in range(400)]
@@ -159,6 +179,17 @@ class TestClassMap(unittest.TestCase):
         self.temp.cleanup()
 
     def test_names_read_from_source(self):
+        self.assertEqual(source_class_names(self.source),
+                         {0: "code", 1: "plate", 2: "junk"})
+
+    def test_names_from_classes_txt(self):
+        """classes.txt пишут labelImg, CVAT и datakit из ml-datasets."""
+        (self.source / "data.yaml").unlink()
+        (self.source / "classes.txt").write_text("code\nplate\n", encoding="utf-8")
+        self.assertEqual(source_class_names(self.source), {0: "code", 1: "plate"})
+
+    def test_data_yaml_wins_over_classes_txt(self):
+        (self.source / "classes.txt").write_text("wrong\n", encoding="utf-8")
         self.assertEqual(source_class_names(self.source),
                          {0: "code", 1: "plate", 2: "junk"})
 

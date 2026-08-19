@@ -62,15 +62,20 @@ def build_dataset(project: Project, sources: list[str] | None = None,
     pairs: list[Pair] = []
     per_source: list[dict] = []
     mappings: dict[str, dict[int, int] | None] = {}
+    origins: dict[str, tuple[str, dict[int, str]]] = {}   # префикс -> (имя, классы)
     for source in source_dirs:
         found = find_pairs(source, grouping)
         groups = {pair.group for pair in found}
         names = source_class_names(source)
         mapping = resolve_class_map(raw_map, source, names, classes)
-        mappings[found[0].prefix if found else str(source)] = mapping
+        key = found[0].prefix if found else str(source)
+        mappings[key] = mapping
+        origins[key] = (source.name, names)
         details = f"{len(found)} пар / {len(groups)} групп"
-        if names and not collapse:
-            details += f" / классы источника: {', '.join(names.values())}"
+        # Классы источника печатаем всегда: именно их незаметное расхождение
+        # с `classes` проекта и портит датасет.
+        details += (f" / классы источника: {', '.join(names.values())}" if names
+                    else " / классы источника не объявлены (нет data.yaml/classes.txt)")
         console.kv(str(source), details)
         if not found:
             console.warn(f"{source}: пар изображение+разметка не найдено")
@@ -99,16 +104,10 @@ def build_dataset(project: Project, sources: list[str] | None = None,
                          + ("  (все классы источников сводятся в один)" if collapse else ""))
     _warn_about_leakage(pairs, groups, grouping)
 
-    histogram, problems = _scan_classes(pairs, mappings, keep_classes, collapse, classes)
+    histogram, strays = _scan_classes(pairs, mappings, keep_classes, collapse, classes)
     _report_classes(histogram, classes)
-    if problems:
-        console.err("Классы разметки не укладываются в classes проекта:")
-        for line in problems[:5]:
-            console.info(f"    {line}")
-        raise SystemExit(
-            "Поправьте dataset.class_map (или dataset.keep_classes) — иначе часть "
-            "разметки потеряется молча"
-        )
+    if strays:
+        _fail_on_strays(strays, origins, classes)
     if verify:
         console.ok("Проверка завершена, ничего не записано")
         return 0
@@ -134,7 +133,7 @@ def build_dataset(project: Project, sources: list[str] | None = None,
     for pair in pairs:
         lines, dropped, _, _ = parse_label(
             pair.label, keep_classes, mappings.get(pair.prefix), collapse, len(classes)
-        ) if pair.label else ([], 0, Counter(), set())
+        ) if pair.label else ([], 0, Counter(), Counter())
         parsed[pair.key] = (lines, dropped)
 
     skipped_negatives = _limit_negatives(project, pairs, parsed, assignment,
@@ -313,22 +312,30 @@ def _write_index(root: Path, pairs: list[Pair], assignment: dict[str, str],
 def _collapse_mode(project: Project, classes: list[str]) -> bool:
     """Сводить ли все классы источников в один.
 
-    По умолчанию — да для одноклассовой задачи (детектор региона) и нет,
-    когда классов несколько: иначе многоклассовая разметка молча схлопнется.
+    Только по явному `collapse_classes: true`. Раньше это включалось само,
+    когда в проекте один класс, и любой посторонний класс источника
+    (типоразмер, весовая табличка) уезжал в датасет под именем целевого —
+    молча и без единого предупреждения. Теперь умолчание («auto») означает
+    «схлопывать нечего»: классы сверяются с `classes` проекта, а расхождение
+    останавливает сборку с подсказкой.
     """
     configured = project.get("dataset.collapse_classes", "auto")
     if isinstance(configured, bool):
         return configured
     if str(configured).lower() == "auto":
-        return len(classes) == 1
+        return False
     raise SystemExit("dataset.collapse_classes: ожидается auto, true или false")
 
 
 def _scan_classes(pairs: list[Pair], mappings: dict, keep_classes: set[int] | None,
-                  collapse: bool, classes: list[str]) -> tuple[Counter, list[str]]:
-    """Пройти разметку до записи: histogram классов и классы вне диапазона."""
+                  collapse: bool, classes: list[str]) -> tuple[Counter, dict]:
+    """Пройти разметку до записи, ничего не записывая.
+
+    Возвращает histogram классов проекта и «чужие» классы по источникам:
+    префикс -> {класс источника: сколько боксов}.
+    """
     histogram: Counter = Counter()
-    problems: list[str] = []
+    strays: dict[str, Counter] = {}
     for pair in pairs:
         if not pair.label:
             continue
@@ -337,11 +344,35 @@ def _scan_classes(pairs: list[Pair], mappings: dict, keep_classes: set[int] | No
         )
         histogram.update(counts)
         if out_of_range:
-            problems.append(
-                f"{pair.label.name}: классы {sorted(out_of_range)} вне "
-                f"0..{len(classes) - 1}"
-            )
-    return histogram, problems
+            strays.setdefault(pair.prefix, Counter()).update(out_of_range)
+    return histogram, strays
+
+
+def _fail_on_strays(strays: dict, origins: dict, classes: list[str]) -> None:
+    """Остановить сборку: в разметке есть классы, которых нет в проекте.
+
+    Это не придирка. Молча свести их в целевой класс — значит научить
+    детектор срабатывать на посторонних объектах, а выбросить молча —
+    потерять разметку, за которую заплачено. Решение принимает человек,
+    поэтому здесь только факты и способы их описать.
+    """
+    console.err("В разметке есть классы, которых нет в classes проекта:")
+    for prefix, counts in strays.items():
+        title, names = origins.get(prefix, (prefix, {}))
+        for source_class, boxes in sorted(counts.items()):
+            name = names.get(source_class)
+            console.info(f"    {title}: класс {source_class}"
+                         + (f" «{name}»" if name else "")
+                         + f" — {boxes} боксов")
+    console.info("  classes проекта: "
+                 + ", ".join(f"{i}:{n}" for i, n in enumerate(classes)))
+    raise SystemExit(
+        "Выберите, что с ними делать:\n"
+        "  classes: [...]                  — добавить их в проект как отдельные классы\n"
+        "  dataset.class_map: {…}          — сопоставить своим классам (можно по именам)\n"
+        "  dataset.keep_classes: [...]     — оставить только нужные, лишнее выбросить\n"
+        "  dataset.collapse_classes: true  — это один и тот же объект, свести всё в класс 0"
+    )
 
 
 def _report_classes(histogram: Counter, classes: list[str]) -> None:
